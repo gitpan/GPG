@@ -388,9 +388,8 @@ GPG - a Perl2GnuPG interface
 =head1 DESCRIPTION
 
 GPG.pm is a Perl5 interface for using GnuPG. GPG work with $scalar (string), 
-as opposite to the existing Perl5 modules GnuPG.pm (which work only 
-with filename...) and GnuPG::Interface (which work with fileshandles, 
-but is heavy to use - all filehandle management is let to the user)
+as opposite to the existing Perl5 modules (GnuPG.pm and GnuPG::Interface)
+
 
 =head1 SYNOPSIS
 
@@ -424,6 +423,9 @@ but is heavy to use - all filehandle management is let to the user)
 
      $TEST_TEXT = $gpg->sign_encrypt($key_id,$passphrase,$TEST_TEXT,$key_id);
   my $decrypt_verify = $gpg->decrypt_verify($passphrase,$TEST_TEXT);
+
+  my $keys = $gpg->list_keys();
+  my $sigd = $gpg->list_sig();
 
 
 =head1 INSTALLATION
@@ -487,6 +489,14 @@ Sign and Encrypt.
 
 Decrypt and verify signature.
 
+=item I<list_keys()>
+
+List all keys from your standard pubring
+
+=item I<list_sig()>
+
+List all keys and signatures from your standard pubring
+
 =item I<delete_secret_key $key_id>
 
 No yet implemented, gnupg don't accpt this in batch mode.
@@ -504,24 +514,30 @@ No yet implemented, gnupg don't accept this in batch mode.
 IPC::Open3 make the fork and manage the filehandles for you.
 
   Q: How secure is GPG ?
-  A: Not very secure. First, GPG is no more secure as 'gpg'. 
+  A: As secure as you want... Be carefull. First, GPG is no 
+more secure as 'gpg'. 
 Second, all passphrases are stored in non-secure memory, unless
 you "chown root" and "chmod 4755" your script first. Third, your
 script probably store passpharses somewhere on the disk, and 
 this is *not* secure.
 
   Q: Why using GPG, and not GnuPG or GnuPG::Interface ??
-  A: For its input/output, GnuPG.pm work only with filename. 
-GnuPG::Interface works with fileshandles, but is heavy to use - all filehandle management 
-is let to the user. GPG work only with $scalar for both input and output. As I develop for a
-web interface, I don't want to write a new file each time I need to communicate with gnupg.
+  A: For its input/output, GnuPG.pm work only with filename 
+(you must write your parameters values in a file and pass 
+the filename to gnupg, and the result will be write in 
+anoter given file)
+GnuPG::Interface works with fileshandles, but is heavy 
+to use - all filehandle management is let to the user. 
+GPG work only with $scalar for both input and output. 
+As I develop for a web interface, I don't want to write 
+a new file each time I need to communicate with gnupg.
 
 =head1 KNOWN BUGS
 
 Bug come (by me) only from gnupg, and *not* from Perl :
 
  - methods "delete_key" and "delete_secret_key" doesn't work, 
-   not because a bug, but because gnupg cannot do iti in batch mode.
+   not because a bug, but because gnupg cannot do that in batch mode.
 
 I hope a later version of gnupg will correct this issue...
 
@@ -531,13 +547,14 @@ I hope a later version of gnupg will correct this issue...
  sign-key / lsign-key / export_key
  fast-import / update-trustdb
  fingerprint
- list-keys /list-sign
 
  delete-key / delete-secret-key (waiting - not possible for now, see BUG)
 
 =head1 SUPPORT
 
 Feel free to send me your questions and comments.
+
+Feedback is ALWAYS welcome !
 
 Commercial support on demand, but for most problem read the "Support" section
 on http://www.gnupg.org.
