@@ -2,22 +2,23 @@ package GPG;
 use strict;
 
   use vars qw/$VERSION/;
-  $VERSION = "0.01";
+  $VERSION = "0.05";
 
   use IO::Handle;
   use IPC::Open3;
 
+  my $GNUPG_PATH = '/usr/local/bin';
+
   sub new ($%) { my ($this,%params) = @_;
     my $class = ref($this) || $this;
     my $self  = {};
-       $self->{'gnupg_path'}  = $params{'gnupg_path'}  || '/usr/local/bin';
-       $self->{'homedir'}     = $params{'homedir'}     || '';
+       $self->{'gnupg_path'}  = $params{'gnupg_path'}  || $GNUPG_PATH;
+       $self->{'homedir'}     = $params{'homedir'}     || $ENV{'HOME'}.'/.gnupg';
        $self->{'config'}      = $params{'config'}      || '';
-       $self->{'armor'}       = $params{'armor'}       || '';
+       $self->{'armor'}       = $params{'armor'}       || '1'; # Default IS armored !
        $self->{'debug'}       = $params{'debug'}       || '';
 
-       $self->{'COMMAND'}  = '';
-       $self->{'COMMAND'} .= "$self->{'gnupg_path'}/gpg";
+       $self->{'COMMAND'}  = "$self->{'gnupg_path'}/gpg";
        $self->{'COMMAND'} .= " -a"                           if $self->{'armor'};
        $self->{'COMMAND'} .= " --config  $self->{'config'}"  if $self->{'config'};
        $self->{'COMMAND'} .= " --homedir $self->{'homedir'}" if $self->{'homedir'};
@@ -28,33 +29,52 @@ use strict;
 
       if ($self->{'debug'}) {
         print "\n********************************************************************\n";
-        print "COMMAND : $self->{'gnupg_path'}/$self->{'COMMAND'}\n";
+        print "COMMAND : $self->{'COMMAND'}\n";
         print "\$self->{'homedir'} : $self->{'homedir'}\n";
-        print "\$self->{'config'} : $self->{'config'}\n";
-        print "\$self->{'armor'} : $self->{'armor'}\n";
-        print "\$self->{'debug'} : $self->{'debug'}\n";
+        print "\$self->{'config'} :  $self->{'config'}\n";
+        print "\$self->{'armor'} :   $self->{'armor'}\n";
+        print "\$self->{'debug'} :   $self->{'debug'}\n";
         print "********************************************************************\n";
       }
+
+    $self->{'warning'} = '';
 
     bless $self, $class;
     return $self;
   }
 
+  sub gnupg_path { my ($this,$value) = @_; $this->{gnupg_path} = $value; }
+  sub homedir    { my ($this,$value) = @_; $this->{homedir}    = $value; }
+  sub config     { my ($this,$value) = @_; $this->{config}     = $value; }
+  sub armor      { my ($this,$value) = @_; $this->{armor}      = $value; }
+  sub debug      { my ($this,$value) = @_; $this->{debug}      = $value; }
+
+    # error() : get/set errors
     sub error { my ($this,$string) = @_;
-      $this->{'err'} = $string;
-      wait();
+      if ($string) {
+        $this->{'error'} = $this->{'error'} ? "$this->{'error'}\n$string" : $string;
+      }
+      else {
+        return $this->{'error'} || '';
+      }
     }
 
-    sub err { my ($this) = @_;
-      my $stderr_msg = $this->{'err'};
-      $this->{'err'} = '';
-      return $stderr_msg;
+    # warning() : same code as for error(), but otherwise :-)
+    sub warning { my ($this,$string) = @_;
+      $string 
+      ? $this->{'warning'} 
+        ? $this->{'warning'} .= "\n$string"
+        : $this->{'warning'}  = "$string"
+      : return $this->{'warning'} || '';
     }
 
     sub start_gpg { my ($this,$command,$input) = @_;
       my ($stdin,$stdout,$stderr) = (IO::Handle->new(),IO::Handle->new(),IO::Handle->new());
       my $pid = open3($stdin,$stdout,$stderr, $command);
-      $this->error("Cannot fork [COMMAND: '$command'].") and return (0) if !$pid;
+      if (!$pid) {
+        $this->error("Cannot fork [COMMAND: '$command'].");
+        return (0);
+      }
 
       print $stdin $input;
       close $stdin;
@@ -67,11 +87,19 @@ use strict;
 
       wait();
 
+      if ($error =~ /Warning/m) {
+        $this->{'warning'} .= "Warning: using insecure memory!";
+        $error =~ s/\n?.*using insecure memory.*\n?\s*//m;
+        # add new warning messages from gnupg here...
+      }
+
+
       if ($this->{'debug'}) {
         print "\n********************************************************************\n";
         print "COMMAND : \n$command [PID $pid]\n";
         print "STDIN  :  \n$input\n";
         print "STDOUT :  \n$output\n";
+        print "WARNING : \n$this->{'warning'}\n";
         print "STDERR :  \n$error\n";
         print "\n********************************************************************\n";
       }
@@ -175,32 +203,131 @@ use strict;
 
 ### import #################################################
 
+    sub read_import_key_result { my ($msg) = @_;
+      my $ret = {};
+         $ret->{total_ok}    = 0;
+         $ret->{total_found} = 0;
+         $ret->{secret}      = [];
+         $ret->{public}      = [];
+
+      my @secret = grep(/secret key imported/,$msg);
+      for my $i (@secret) {
+        $i =~ /.*\skey\s(\w+)\:\ssecret key imported/;
+        push @{$ret->{secret}}, $1 and $ret->{total_ok}++ if $1;
+        
+      }
+
+      my @public = grep(/public key imported/,$msg);
+      for my $i (@public) {
+        $i =~ /.*\skey\s(\w+)\:\spublic key imported/;
+        push @{$ret->{public}}, $1 and $ret->{total_ok}++ if $1;
+      }
+
+      $msg =~ /Total number processed\:\s+(\d+)\s/;
+      $ret->{total_found} = $1 if $1;
+
+      return $ret;
+    }
+
+  # import is a Perl reserved keyword, sorry...
   sub import_keys { my ($this,$import) = @_;
     my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.' --import', $import);
     return if !$pid;
 
-    my $ok = '';
-    if ($error =~ /\spublic key imported\s/m) {
-      $error =~ /\sTotal number processed\: (\d+)\s/m;
-      my $processed = $1 || '';
-      $error =~ /\simported\: (\d+)\s/m;
-      my $imported = $1 || '';
-      $ok = "$processed public key imported" if $processed && $processed eq $imported;
-    }
-    elsif ($error =~ /\ssecret key imported\s/m) {
-      $error =~ /\sTotal number processed\: (\d+)\s/m;
-      my $processed = $1 || '';
-      $error =~ /\ssecret keys imported\: (\d+)\s/m;
-      my $imported = $1 || '';
-      $ok = "$1 secret key imported" if $processed && $processed eq $imported;
-    }
-    $this->error($error) and return if !$ok;
+    my $res = read_import_key_result($error);
+    #$this->error($error) and return if !$res;
 
-    return $ok;
+    return $res;
+  }
+
+  sub fast_import { my ($this,$import) = @_;
+    my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.' --fast-import', $import);
+    return if !$pid;
+
+    my $res = read_import_key_result($error);
+    #$this->error($error) and return if !$res;
+
+    return $res;
+  }
+
+  sub update_trustdb { my ($this) = @_;
+    my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.' --update-trustdb', '');
+    return if !$pid;
+
+    $error =~ s/^gpg: (\d+) keys processed\s*//;
+    my $number_processed = $1 || '0';
+
+    $this->error($error) and return if $error;
+    return $number_processed;
+  }
+
+### fingerprint ############################################
+
+  sub fingerprint { my ($this,$key_id) = @_;
+    my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.
+         "--fingerprint $key_id", "");
+    return if !$pid;
+    $this->error($error) and return if $error;
+
+    my $fingerprint = [];
+    my @text = split(/\s*\n/,$output);
+
+    for(my $i = 0; $i < $#text; $i++) {
+      if ($text[$i] =~ /^pub\s+.*\/(\w+)\s+\S+\s+(.*)\s*$/) {
+        my $hash = {};
+        $hash->{'key_id'}   =  $1 if $1;
+        $hash->{'key_name'} =  $2 if $2;
+
+        $text[$i+1]            =~ /^\s+Key fingerprint = (.*)\s*$/m;
+        $hash->{'fingerprint'} =  $1 if $1;
+        push @$fingerprint, $hash;
+        $i++;
+      }
+    }
+
+    return $fingerprint;
   }
 
 
-### sign ###################################################
+### sign_key ###############################################
+
+  sub sign_key { my ($this,$key_id,$passphrase,$key_to_sign) = @_;
+    return "gpg: can't do that in batchmode (thanks gnupg...)";
+    my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.
+         "--passphrase-fd 0 --default-key $key_id --sign-key $key_to_sign","$passphrase");
+    return if !$pid;
+
+    $this->error($error) and return if $error;
+    return $output;
+  }
+
+  sub lsign_key { my ($this,$key_id) = @_;
+    return "gpg: can't do that in batchmode (thanks gnupg...)";
+  }
+
+
+### export_key #############################################
+
+  sub export_key { my ($this,$key_id) = @_;
+    my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.
+         "--export-all $key_id", "");
+    return if !$pid;
+
+    $this->error($error) and return if $error;
+    return $output;
+  }
+
+  sub export_secret_key { my ($this,$key_id) = @_;
+    my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.
+         "--export-secret-key $key_id", "");
+    return if !$pid;
+
+    $this->error($error) and return if $error;
+    return $output;
+  }
+
+
+### clearsign ##############################################
 
   sub clearsign { my ($this,$key_id,$passphrase,$text) = @_;
     my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.
@@ -212,23 +339,57 @@ use strict;
   }
 
 
+### detach_sign ############################################
+
+  sub detach_sign { my ($this,$key_id,$passphrase,$text) = @_;
+    my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.
+         "--passphrase-fd 0 --default-key $key_id --detach-sign", "$passphrase\n$text");
+    return if !$pid;
+
+    $this->error($error) and return if $error;
+    return $output;
+  }
+
+
 ### verify #################################################
+
+    sub check_verify_result { my ($text) = @_;
+      my $verify = [];
+      my @text = split(/\s*\n/,$text);
+      for(my $i = 0; $i < $#text; $i++) {
+        if ($text[$i] =~ /\sSignature made (.*) using (\w+) key ID (\w+)\s*/) {
+          my $hash = {};
+          $hash->{'sig_date'} =  $1 if $1;
+          $hash->{'algo'}     =  $2 if $2;
+          $hash->{'key_id'}   =  $3 if $3;
+
+          $hash->{'ok'}       =  $text[$i+1] =~ /\sGood signature from \"/m ? 1 : 0;
+          $text[$i+1]         =~ / signature from \"(.*)\"\s*/m;
+          $hash->{'key_user'} =  $1 if $1;
+          push @$verify, $hash;
+          $i++;
+        }
+      }
+
+      return $verify;
+    }
 
   sub verify { my ($this,$string) = @_;
     my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.
          "--verify", "$string");
     return if !$pid;
 
-    my $verify = {};
-    $verify->{'ok'}       =  $error =~ /\sGood signature from \"/m ? 1 : 0;
-    $error                =~ / signature from \"(.*)\"\s/m;
-    $verify->{'key_user'} =  $1 if $1;
-    $error                =~ /\susing \w+ key ID (\w+)\s/m;
-    $verify->{'key_id'}   =  $1 if $1;
-    $error                =~ /\sSignature made (.*) using\s/m;
-    $verify->{'sig_date'} =  $1 if $1;
+    return check_verify_result($error);
+  }
 
-    return $verify;
+### verify_files ###########################################
+
+  sub verify_files { my ($this,$string) = @_;
+    my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.
+         "--verify", "$string");
+    return if !$pid;
+
+    return check_verify_result($error);
   }
 
 
@@ -347,7 +508,7 @@ use strict;
   sub prototype { my ($this) = @_;
     return; # XXX 'prototype' : only as example if you would add new function
     my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.
-         "--passphrase-fd 0", "");
+         "--passphrase-fd 0", "passphrase here...");
     return if !$pid;
     $this->error($error) and return if $error;
 
@@ -358,7 +519,7 @@ use strict;
 ### delete_key #############################################
 
   sub delete_key { my ($this,$key_id) = @_;
-    warn "Not yet implemented - read the doc please." and return;
+    CORE::warn "Not yet implemented - read the doc please." and return;
 
     my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.
          "--delete-key $key_id", "y\n");
@@ -371,7 +532,7 @@ use strict;
 ### delete_secret_key ######################################
 
   sub delete_secret_key { my ($this,$key_id) = @_;
-    warn "Not yet implemented - read the doc please." and return;
+    CORE::warn "Not yet implemented - read the doc please." and return;
 
     my ($pid,$output,$error) = start_gpg($this,$this->{'COMMAND'}.
          "--delete-secret-key $key_id", "y\n");
@@ -387,8 +548,9 @@ GPG - a Perl2GnuPG interface
 
 =head1 DESCRIPTION
 
-GPG.pm is a Perl5 interface for using GnuPG. GPG work with $scalar (string), 
-as opposite to the existing Perl5 modules (GnuPG.pm and GnuPG::Interface)
+GPG.pm is a Perl5 interface for using GnuPG. GPG works with $scalar (string), 
+as opposed to the existing Perl5 modules (GnuPG.pm and GnuPG::Interface, which
+communicate with gnupg through filehandles or filenames)
 
 
 =head1 SYNOPSIS
@@ -399,7 +561,7 @@ as opposite to the existing Perl5 modules (GnuPG.pm and GnuPG::Interface)
 
   my $gpg = new GPG(homedir  => './test'); # Creation
 
-  die $gpg->err() if $gpg->err(); # Error handling
+  die $gpg->error() if $gpg->error(); # Error handling
 
   my ($pubring,$secring) = $gpg->gen_key(key_size => "512",
                                         real_name  => "Joe Test",
@@ -430,48 +592,68 @@ as opposite to the existing Perl5 modules (GnuPG.pm and GnuPG::Interface)
 
 =head1 INSTALLATION
 
- % chown root /usr/local/bin/gpg ; chmod 4755 /usr/local/bin/gpg
  % perl Makefile.PL
  % make
  % make test
  % make install
 
+  Tips :
+  - if you want secure memory, do not forget :
+    % chown root /usr/local/bin/gpg ; chmod 4755 /usr/local/bin/gpg
+
 =head1 METHODS
 
-Look at the "test.pl" and "quick_test.pl" for examples and more explanation.
+Look at the "test.pl" and "quick_test.pl" for examples and futher explanations.
 
-You can change "VERBOSE" to "1" in "test.pl" and restart the test, too.
+You can set "VERBOSE" in "test.pl" to "1"  and restart the test, to see more extensive output.
 
 =over 4
+
+=item I<new %params>
+
+ Parameters are :
+ - gnupg_path (most of time, 'gpg' stand inside /usr/local/bin)
+ - homedir (gnupg homedir, default is $HOME/.gnupg)
+ - config (gnupg config file)
+ - armor (armored if 1, DEFAULT IS *1* !)
+ - debug (1 for debugging, default is 0)
 
 =item I<gen_key %params>
 
  Parameters are :
  - key_size (see gnupg doc)
- - real_name (usually first name and last name, cannot be empty)
- - email (email address, cannot be empty)
- - comment (can be empty)
+ - real_name (usually first name and last name, must not be empty)
+ - email (email address, must not be empty)
+ - comment (may be empty)
  - passphrase (*SHOULD* be at least 16 chars long...)
 
-Please note the keys are not imported after creation, please read "test.pl" for an example,
-or read the "list_packets" method description.
+Please note that the keys are not imported after creation, please read "test.pl" for an example,
+or read the description of the "list_packets" method.
 
 =item I<list_packets $packet>
 
-Give a packet description for public and secret keys, run "test.pl"
+Output a packet description for public and secret keys, run "test.pl"
 with "VERBOSE=1" for a better description.
 
 =item I<import_keys $key>
 
-Import the key(s) in the current keyring.
+Import the key(s) into the current keyring.
 
 =item I<clearsign $key_id, $passphrase, $text>
 
 Clearsign the current text.
 
+=item I<detach_sign $key_id, $passphrase, $text>
+
+Make a detached signature of the current text.
+
 =item I<verify $signed_text>
 
 Verify a signature.
+
+=item I<verify_files $signed_text>
+
+Verify signature of a all files from stdin, faster than verify() method.
 
 =item I<encrypt $text, ($dest_1, ...)>
 
@@ -479,7 +661,7 @@ Encrypt.
 
 =item I<decrypt $passphrase, $text>
 
-Decrypt (yes, really)
+Decrypt (yes, really).
 
 =item I<sign_encrypt $key_id, $passphrase, $text, ($dest_1, ...)>
 
@@ -499,11 +681,11 @@ List all keys and signatures from your standard pubring
 
 =item I<delete_secret_key $key_id>
 
-No yet implemented, gnupg don't accpt this in batch mode.
+No yet implemented, gnupg doesn't accpt this in batch mode.
 
 =item I<delete_key $key_id>
 
-No yet implemented, gnupg don't accept this in batch mode.
+No yet implemented, gnupg doesn't accept this in batch mode.
 
 =back
 
@@ -511,44 +693,43 @@ No yet implemented, gnupg don't accept this in batch mode.
 
  Q: How does it work ?
  A: it uses IPC::Open3 to connect the 'gpg' program. 
-IPC::Open3 make the fork and manage the filehandles for you.
+IPC::Open3 is executing the fork and managing the filehandles for you.
 
   Q: How secure is GPG ?
   A: As secure as you want... Be carefull. First, GPG is no 
-more secure as 'gpg'. 
+more securer than 'gpg'. 
 Second, all passphrases are stored in non-secure memory, unless
 you "chown root" and "chmod 4755" your script first. Third, your
 script probably store passpharses somewhere on the disk, and 
 this is *not* secure.
 
   Q: Why using GPG, and not GnuPG or GnuPG::Interface ??
-  A: For its input/output, GnuPG.pm work only with filename 
-(you must write your parameters values in a file and pass 
-the filename to gnupg, and the result will be write in 
-anoter given file)
-GnuPG::Interface works with fileshandles, but is heavy 
-to use - all filehandle management is let to the user. 
-GPG work only with $scalar for both input and output. 
-As I develop for a web interface, I don't want to write 
-a new file each time I need to communicate with gnupg.
+  A: Because of their input/output facilities, 
+GnuPG.pm only works on filenames. 
+GnuPG::Interface works with fileshandles, but is hard to use - all filehandle
+management is left up to the user. GPG is working with $scalar only for both
+input and output. Since I am developing for a web interface, I don't want to
+write new files each time I need to communicate with gnupg.
+
 
 =head1 KNOWN BUGS
 
-Bug come (by me) only from gnupg, and *not* from Perl :
+Currently known bugs are caused by gnupg (www.gnupg.org) and *not* by GPG.pm :
 
- - methods "delete_key" and "delete_secret_key" doesn't work, 
-   not because a bug, but because gnupg cannot do that in batch mode.
+ - the methods "delete_key" and "delete_secret_key" do not work, 
+   Not because of a bug but because gnupg cannot do that in batch mode.
+ - sign_key() and lsign_key() : "gpg: can't do that in batchmode"
+ - verify() and verify_files() output only the wrong file, even only one has
+   a wrong signature. Other files are ignored.
 
-I hope a later version of gnupg will correct this issue...
+I hope a later version of gnupg will correct this issues...
 
 =head1 TODO
 
- import_keys : no test for multiples import (of both public/secret keys)
- sign-key / lsign-key / export_key
- fast-import / update-trustdb
- fingerprint
+ see CHANGES.txt.
 
- delete-key / delete-secret-key (waiting - not possible for now, see BUG)
+ most of awaiting changes cannot be done until gnupg itself
+ get an extented batch mode (currently very limited)
 
 =head1 SUPPORT
 
@@ -556,28 +737,39 @@ Feel free to send me your questions and comments.
 
 Feedback is ALWAYS welcome !
 
-Commercial support on demand, but for most problem read the "Support" section
+Commercial support on demand, but for most problems read the "Support" section
 on http://www.gnupg.org.
 
 =head1 DOWNLOAD
 
-https://sourceforge.net/project/filelist.php?group_id=8630
+CPAN : ${CPAN}/authors/id/M/MI/MILES/
+
+sourceforge : https://sourceforge.net/project/filelist.php?group_id=8630
 
 developpers info at https://sourceforge.net/projects/gpg
 
-doc and home-page at http://gpg.sourceforge.net/
+doc and home-page at http://gpg.sourceforge.net/ (this document)
+
+=head1 DEVELOPPEMENT
+
+ CVS access :
+ 
+ look at http://acity.sourceforge.net/devel.html
+ ... and replace "agora" or "acity" by "gpg".
+
 
 =head1 SEE ALSO
 
  GnuPG            - http://www.gnupg.org
- GnuPG.pm         - input/output only throw file_name
- GnuPG::Interface - input/output only throw file_handles
+ GnuPG.pm         - input/output only through file_names
+ GnuPG::Interface - input/output only through file_handles
                     see http://GnuPG-Interface.sourceforge.net/ or CPAN
  IPC::Open3       - communication with 'gpg', see "perldoc perlipc"
 
 =head1 AUTHOR
 
-miles@_REMOVE_THIS_users.sourceforge.net, pf@_REMOVE_THIS_spin.ch
+ miles@_REMOVE_THIS_users.sourceforge.net, pf@_REMOVE_THIS_spin.ch
+ extra thanks to tpo_at_spin
 
 =cut
 1; # End.
